@@ -45,6 +45,9 @@ from .configuration_florence2 import Florence2LanguageConfig
 from .configuration_florence2 import Florence2VisionConfig
 
 
+import prompt_pool
+
+
 from transformers.activations import ACT2FN
 from transformers.modeling_attn_mask_utils import (
     _prepare_4d_attention_mask,
@@ -420,48 +423,156 @@ class WindowAttention(nn.Module):
         self.proj = nn.Linear(dim, dim)
 
         self.softmax = nn.Softmax(dim=-1)
-
-    def forward(self, x, size):
-
+    def forward(
+        self,
+        x: torch.Tensor,
+        size: tuple[int, int],
+        prompt: torch.Tensor | None = None,
+    ):
         H, W = size
         B, L, C = x.shape
-        assert L == H * W, "input feature has wrong size"
+
+        if L != H * W:
+            raise ValueError(
+                f"Expected {H * W} spatial tokens, but received {L}"
+            )
 
         x = x.view(B, H, W, C)
 
-        pad_l = pad_t = 0
+        pad_l = 0
+        pad_t = 0
         pad_r = (self.window_size - W % self.window_size) % self.window_size
         pad_b = (self.window_size - H % self.window_size) % self.window_size
-        x = F.pad(x, (0, 0, pad_l, pad_r, pad_t, pad_b))
+
+        x = F.pad(
+            x,
+            (0, 0, pad_l, pad_r, pad_t, pad_b),
+        )
+
         _, Hp, Wp, _ = x.shape
 
-        x = window_partition(x, self.window_size)
-        x = x.view(-1, self.window_size * self.window_size, C)
+        x = window_partition(
+            x,
+            self.window_size,
+        )
 
-        # W-MSA/SW-MSA
-        # attn_windows = self.attn(x_windows)
+        x = x.view(
+            -1,
+            self.window_size * self.window_size,
+            C,
+        )
 
-        B_, N, C = x.shape
-        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        B_windows, num_window_tokens, _ = x.shape
+        head_dim = C // self.num_heads
+
+        qkv = self.qkv(x).reshape(
+            B_windows,
+            num_window_tokens,
+            3,
+            self.num_heads,
+            head_dim,
+        ).permute(2, 0, 3, 1, 4)
+
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        q = q * self.scale
-        attn = (q @ k.transpose(-2, -1))
-        attn = self.softmax(attn)
+        if prompt is not None:
+            if prompt.ndim != 3:
+                raise ValueError(
+                    "prompt must have shape "
+                    "(batch_size, prompt_count, embed_dim)"
+                )
 
-        x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
+            if prompt.shape[0] != B:
+                raise ValueError(
+                    f"Prompt batch size {prompt.shape[0]} "
+                    f"does not match input batch size {B}"
+                )
+
+            if prompt.shape[-1] != C:
+                raise ValueError(
+                    f"Prompt embed_dim {prompt.shape[-1]} "
+                    f"does not match attention embed_dim {C}"
+                )
+
+            prompt_count = prompt.shape[1]
+
+            prompt_qkv = self.qkv(prompt).reshape(
+                B,
+                prompt_count,
+                3,
+                self.num_heads,
+                head_dim,
+            ).permute(2, 0, 3, 1, 4)
+
+            _, prompt_k, prompt_v = (
+                prompt_qkv[0],
+                prompt_qkv[1],
+                prompt_qkv[2],
+            )
+
+            windows_per_image = (
+                (Hp // self.window_size)
+                * (Wp // self.window_size)
+            )
+
+            prompt_k = prompt_k.repeat_interleave(
+                windows_per_image,
+                dim = 0,
+            )
+
+            prompt_v = prompt_v.repeat_interleave(
+                windows_per_image,
+                dim = 0,
+            )
+
+            k = torch.cat(
+                [prompt_k, k],
+                dim = 2,
+            )
+
+            v = torch.cat(
+                [prompt_v, v],
+                dim = 2,
+            )
+
+        q = q * self.scale
+
+        attention = q @ k.transpose(-2, -1)
+        attention = self.softmax(attention)
+
+        x = attention @ v
+
+        x = x.transpose(1, 2).reshape(
+            B_windows,
+            num_window_tokens,
+            C,
+        )
+
         x = self.proj(x)
 
-        # merge windows
         x = x.view(
-            -1, self.window_size, self.window_size, C
+            -1,
+            self.window_size,
+            self.window_size,
+            C,
         )
-        x = window_reverse(x, B, self.window_size, Hp, Wp)
+
+        x = window_reverse(
+            x,
+            B,
+            self.window_size,
+            Hp,
+            Wp,
+        )
 
         if pad_r > 0 or pad_b > 0:
             x = x[:, :H, :W, :].contiguous()
 
-        x = x.view(B, H * W, C)
+        x = x.view(
+            B,
+            H * W,
+            C,
+        )
 
         return x, size
 
@@ -488,16 +599,36 @@ class SpatialBlock(nn.Module):
             drop_path
         )
 
-    def forward(self, x, size):
+    def forward(
+        self,
+        x: torch.Tensor,
+        size: tuple[int, int],
+        prompt: torch.Tensor | None = None,
+    ):
         if self.conv1:
-            x, size = self.conv1(x, size)
-        x, size = self.window_attn(x, size)
+            x, size = self.conv1(
+                x,
+                size,
+            )
+
+        x, size = self.window_attn(
+            x,
+            size,
+            prompt,
+        )
 
         if self.conv2:
-            x, size = self.conv2(x, size)
-        x, size = self.ffn(x, size)
-        return x, size
+            x, size = self.conv2(
+                x,
+                size,
+            )
 
+        x, size = self.ffn(
+            x,
+            size,
+        )
+
+        return x, size
 
 class DaViT(nn.Module):
     """ DaViT: Dual-Attention Transformer
@@ -605,6 +736,15 @@ class DaViT(nn.Module):
 
         self.convs = nn.ModuleList(convs)
         self.blocks = nn.ModuleList(blocks)
+        self.prompt_pool = prompt_pool.PromptPool(
+            embed_dim = embed_dims[-1],
+            length = 5,
+            embedding_key = "mean",
+            pool_size = 10,
+            num_layers = depths[-1],
+            top_k = 5,
+            batchwise_prompt = False,
+)
 
         self.norms = norm_layer(self.embed_dims[-1])
         self.avgpool = nn.AdaptiveAvgPool1d(1)
@@ -614,20 +754,71 @@ class DaViT(nn.Module):
     def dim_out(self):
         return self.embed_dims[-1]
 
-    def forward_features_unpool(self, x):
+    def forward_features_unpool(self, x: torch.Tensor):
         """
-        forward until avg pooling 
-        Args:
-            x (_type_): input image tensor
+        Run the DaViT stages until average pooling.
         """
-        input_size = (x.size(2), x.size(3))
-        for conv, block in zip(self.convs, self.blocks):
-            x, input_size = conv(x, input_size)
-            if self.enable_checkpoint:
-                x, input_size = checkpoint.checkpoint(block, x, input_size)
+
+        input_size = (
+            x.size(2),
+            x.size(3),
+        )
+
+        final_stage_index = len(self.convs) - 1
+
+        for stage_index, (conv, block) in enumerate(
+            zip(self.convs, self.blocks)
+        ):
+            x, input_size = conv(
+                x,
+                input_size,
+            )
+
+            if stage_index == final_stage_index:
+                prompt_res = self.prompt_pool(x)
+
+                prompts = prompt_res["batched_prompt"]
+
+                if prompts.shape[0] != len(block):
+                    raise ValueError(
+                        "The number of prompt layers must match the "
+                        "number of block pairs in the prompted stage. "
+                        f"Received {prompts.shape[0]} prompt layers and "
+                        f"{len(block)} block pairs."
+                    )
+
+                for layer_index, block_pair in enumerate(block):
+                    spatial_block = block_pair._modules["spatial_block"]
+                    channel_block = block_pair._modules["channel_block"]
+
+                    layer_prompt = prompts[layer_index]
+
+                    x, input_size = spatial_block(
+                        x,
+                        input_size,
+                        layer_prompt,
+                    )
+
+                    x, input_size = channel_block(
+                        x,
+                        input_size,
+                    )
+
             else:
-                x, input_size = block(x, input_size)
-        return x
+                if self.enable_checkpoint:
+                    x, input_size = checkpoint.checkpoint(
+                        block,
+                        x,
+                        input_size,
+                        use_reentrant = False,
+                    )
+                else:
+                    x, input_size = block(
+                        x,
+                        input_size,
+                    )
+
+        return x 
 
     def forward_features(self, x):
         x = self.forward_features_unpool(x)

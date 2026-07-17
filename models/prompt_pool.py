@@ -95,4 +95,17 @@ class PromptPool(nn.Module):
         reduce_sim = torch.sum(sim_pull) / batch_size
         res["reduce_sim"] = reduce_sim
 
+        return res    
+
+    def forward(self, x):
+        res = {}
+
+        x_embed_mean = self.extract_query(x)
+
+        res = self.select_prompts(
+            prompt_key = self.prompt_key,
+            x_embed_mean = x_embed_mean,
+            res = res
+        )
+
         return res
