@@ -1,5 +1,5 @@
 conda activate libero
-cd /data2/daniel/Documents/X-VLA/evaluation/libero
+cd /data2/daniel/Documents/X-VLA-L2P/evaluation/libero
 
 export CUDA_VISIBLE_DEVICES=1 # sim renders on a different GPU than the server
 MUJOCO_GL=egl python libero_client.py \

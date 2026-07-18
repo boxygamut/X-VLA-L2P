@@ -115,14 +115,17 @@ def set_seed(seed: int):
 
 def build_optimizer(model: XVLA, lr: float, weight_decay: float, betas=(0.9, 0.95), lr_coef_soft=1.0):
     """Split param groups by module type with different learning rates."""
-    vlm_params = list(model.vlm.parameters())
+    vision_prompt_params = list(model.vlm.vision_tower.prompt_pool.parameters())
+    vision_prompt_ids = set(map(id, vision_prompt_params))
+    vlm_params = [p for p in model.vlm.parameters() if id(p) not in vision_prompt_ids]
     soft_prompt_params = list(model.transformer.soft_prompt_hub.parameters())
     action_params = list(model.transformer.action_decoder.parameters()) + list(model.transformer.action_encoder.parameters())
-    exclude = set(map(id, vlm_params + soft_prompt_params + action_params))
+    exclude = set(map(id, vlm_params + vision_prompt_params + soft_prompt_params + action_params))
     transformer_core_params = [p for p in model.parameters() if id(p) not in exclude]
     param_groups = [
         {"name": "vlm", "params": vlm_params, "lr": 0.0, "weight_decay": weight_decay},
         {"name": "transformer_core", "params": transformer_core_params, "lr": 0.0, "weight_decay": weight_decay},
+        {"name": "vision_prompts", "params": vision_prompt_params, "lr": lr * lr_coef_soft, "weight_decay": weight_decay},
         {"name": "soft_prompts", "params": soft_prompt_params, "lr": lr * lr_coef_soft, "weight_decay": weight_decay},
         {"name": "action_heads", "params": action_params, "lr": lr, "weight_decay": weight_decay},
     ]
@@ -156,6 +159,7 @@ def update_group_lrs(optim, step, args):
     base = {
         "vlm": args.learning_rate * args.learning_coef,
         "transformer_core": args.learning_rate,
+        "vision_prompts": args.learning_rate * args.learning_coef,
         "soft_prompts": args.learning_rate * args.learning_coef,
         "action_heads": args.learning_rate,
     }
@@ -164,6 +168,7 @@ def update_group_lrs(optim, step, args):
     if step < args.freeze_steps:
         set_group_lr(optim, "vlm", 0.0)
         set_group_lr(optim, "transformer_core", 0.0)
+        set_group_lr(optim, "vision_prompts", base["vision_prompts"])
         set_group_lr(optim, "soft_prompts", base["soft_prompts"])
         set_group_lr(optim, "action_heads", base["action_heads"])
     else:
@@ -228,7 +233,8 @@ def main(args):
 
         # Forward & backward
         loss_dict: Dict[str, torch.Tensor] = model(**inputs)
-        loss = sum(loss_dict.values())
+        prompt_reduce_sim = loss_dict.pop("prompt_reduce_sim")
+        loss = sum(loss_dict.values()) - 0.1 * prompt_reduce_sim
         accelerator.backward(loss)
         if args.max_grad_norm:
             accelerator.clip_grad_norm_(model.parameters(), args.max_grad_norm)

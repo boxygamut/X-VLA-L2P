@@ -45,7 +45,7 @@ from .configuration_florence2 import Florence2LanguageConfig
 from .configuration_florence2 import Florence2VisionConfig
 
 
-import prompt_pool
+from . import prompt_pool
 
 
 from transformers.activations import ACT2FN
@@ -744,7 +744,9 @@ class DaViT(nn.Module):
             num_layers = depths[-1],
             top_k = 5,
             batchwise_prompt = False,
-)
+        )
+
+        self.prompt_reduce_sim = 0
 
         self.norms = norm_layer(self.embed_dims[-1])
         self.avgpool = nn.AdaptiveAvgPool1d(1)
@@ -776,6 +778,7 @@ class DaViT(nn.Module):
 
             if stage_index == final_stage_index:
                 prompt_res = self.prompt_pool(x)
+                self.prompt_reduce_sim = prompt_res["reduce_sim"]
 
                 prompts = prompt_res["batched_prompt"]
 

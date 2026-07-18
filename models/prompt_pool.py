@@ -40,9 +40,11 @@ class PromptPool(nn.Module):
         nn.init.uniform_(self.prompt, a = 0.0, b = 0.01)
 
         self.key_shape = (self.pool_size, self.embed_dim)
-        self.prompt_key = nn.Parameter(torch.zeros(
+        self.prompt_key = nn.Parameter(torch.empty(
             self.key_shape[0], self.key_shape[1]
         ))
+
+        nn.init.uniform_(self.prompt_key, a = -0.01, b = 0.01)
     
     def extract_query(self, x_embed):
          return torch.mean(x_embed, dim = 1)
