@@ -175,9 +175,7 @@ class XVLA(PreTrainedModel):
             proprio=proprio_m,
             **enc,
         )
-        loss_dict = self.action_space.compute_loss(pred_action, action)
-        loss_dict["prompt_reduce_sim"] = self.vlm.vision_tower.prompt_reduce_sim
-        return loss_dict
+        return self.action_space.compute_loss(pred_action, action)
 
     # ================================= inference =================================
     @torch.no_grad()
