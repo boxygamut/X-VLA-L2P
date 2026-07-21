@@ -168,14 +168,14 @@ class XVLA(PreTrainedModel):
         action_noisy = torch.randn_like(action) * t.view(-1, 1, 1) + action * (1 - t).view(-1, 1, 1)
         proprio_m, action_noisy_m = self.action_space.preprocess(proprio, action_noisy)
 
-        pred_action = self.transformer(
+        pred_action, prompt_pool_res = self.transformer(
             domain_id=domain_id,
             action_with_noise=action_noisy_m,
             t=t,
             proprio=proprio_m,
             **enc,
         )
-        return self.action_space.compute_loss(pred_action, action)
+        return self.action_space.compute_loss(pred_action, action), prompt_pool_res
 
     # ================================= inference =================================
     @torch.no_grad()
@@ -206,14 +206,14 @@ class XVLA(PreTrainedModel):
             t = torch.full((B,), i / steps, device=proprio.device, dtype=proprio.dtype)
             x_t = x1 * t.view(-1, 1, 1) + action * (1 - t).view(-1, 1, 1)
             proprio_m, x_t_m = self.action_space.preprocess(proprio, x_t)
-            action = self.transformer(
+            action, prompt_pool_res = self.transformer(
                 domain_id=domain_id,
                 action_with_noise=x_t_m,
                 proprio=proprio_m,
                 t=t,
                 **enc,
             )
-        return self.action_space.postprocess(action)
+        return self.action_space.postprocess(action), prompt_pool_res
 
     # =============================== FastAPI service =============================
     def _build_app(self, processor):
@@ -276,7 +276,8 @@ class XVLA(PreTrainedModel):
 
                 # Inference
                 steps = int(payload.get("steps", 10))
-                action = self.generate_actions(**inputs, steps=steps).squeeze(0).float().cpu().numpy()
+                action, _ = self.generate_actions(**inputs, steps=steps)
+                action = action.squeeze(0).float().cpu().numpy()
                 return JSONResponse({"action": action.tolist()})
 
             except Exception:

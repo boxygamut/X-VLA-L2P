@@ -23,6 +23,7 @@ from typing import Final, Iterable, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from . import prompt_pool
 
 
 # ------------------------------- Small utils ----------------------------------
@@ -332,6 +333,16 @@ class SoftPromptedTransformer(nn.Module):
         )
         self.action_decoder = DomainAwareLinear(hidden_size, dim_action, num_domains=num_domains)
 
+        self.prompt_pool = prompt_pool.PromptPool(
+            embed_dim = hidden_size,
+            length = 5,
+            embedding_key = "mean",
+            pool_size = 10,
+            num_layers = 1,
+            top_k = 5,
+            batchwise_prompt = False
+        )
+
         if len_soft_prompts > 0:
             self.soft_prompt_hub = nn.Embedding(num_domains, len_soft_prompts * hidden_size)
             nn.init.normal_(self.soft_prompt_hub.weight, std=0.02)
@@ -395,9 +406,13 @@ class SoftPromptedTransformer(nn.Module):
             soft_prompts = self.soft_prompt_hub(domain_id).view(B, self.len_soft_prompts, self.hidden_size)
             x = torch.cat([x, soft_prompts], dim=1)
 
+        res = self.prompt_pool(x)
+        prompts = res["batched_prompt"].squeeze(0)
+        x = torch.cat([x, prompts], dim = 1)
+
         # Transformer backbone
         for block in self.blocks:
             x = block(x)
 
         # Decode only the action segment
-        return self.action_decoder(self.norm(x[:, :num_actions]), domain_id)
+        return self.action_decoder(self.norm(x[:, :num_actions]), domain_id), res
