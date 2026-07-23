@@ -22,7 +22,8 @@ class PromptPool(nn.Module):
         pool_size: int = 1,
         num_layers: int = 1, 
         top_k: int = 1,
-        batchwise_prompt: bool = False
+        batchwise_prompt: bool = False,
+        normalization_eps: float = 1e-6,
     ) -> None:
         super().__init__()
         self.embed_dim = embed_dim
@@ -32,6 +33,7 @@ class PromptPool(nn.Module):
         self.num_layers = num_layers
         self.top_k = top_k
         self.batchwise_prompt = batchwise_prompt
+        self.normalization_eps = normalization_eps
 
         self.prompt = nn.Parameter(torch.empty(
             self.num_layers, self.pool_size, self.length, self.embed_dim
@@ -49,10 +51,22 @@ class PromptPool(nn.Module):
     def extract_query(self, x_embed):
          return torch.mean(x_embed, dim = 1)
 
+    def normalize(self, x):
+        # Keep cosine normalization and its backward pass out of reduced
+        # precision. The default F.normalize epsilon (1e-12) underflows to zero
+        # in fp16, turning a zero vector into 0/0 and surfacing later as a
+        # MulBackward0 NaN in the pull-constraint loss.
+        return F.normalize(
+            x.float(),
+            p = 2,
+            dim = -1,
+            eps = self.normalization_eps,
+        )
+
     def select_prompts(self, prompt_key, x_embed_mean, res):
         batch_size = x_embed_mean.shape[0]
-        prompt_key_norm = F.normalize(prompt_key, p = 2, dim = -1)
-        x_embed_norm = F.normalize(x_embed_mean, p = 2, dim = -1)
+        prompt_key_norm = self.normalize(prompt_key)
+        x_embed_norm = self.normalize(x_embed_mean)
 
         csim = x_embed_norm @ prompt_key_norm.transpose(0, 1)
 
