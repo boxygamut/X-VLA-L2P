@@ -221,6 +221,7 @@ def main(args):
     global_step, t0 = 0, time.time()
     logger.info(f"🚀 Start training for {args.iters} iterations | world_size={accelerator.num_processes}")
     
+    torch.autograd.set_detect_anomaly(True)
     for batch in train_dataloader:
         # Encode language
         lang = processor.encode_language(batch["language_instruction"])
