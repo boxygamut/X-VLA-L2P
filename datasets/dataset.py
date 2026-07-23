@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 from typing import Dict, Iterable, List
-import io, json, random, numpy as np, torch
+import io, json, random, warnings, numpy as np, torch
 from torch.utils.data import IterableDataset
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
@@ -92,19 +92,30 @@ class InfiniteDataReader(IterableDataset):
         Handler = get_handler_cls(robot_type)
         handler = Handler(meta=meta, num_views=self.num_views)
         for traj_idx in traj_indices:
-                for sample in handler.iter_episode(
-                    traj_idx,
-                    num_actions=self.num_actions,
-                    training=self.training,
-                    image_aug=self.image_aug,
-                    lang_aug_map= meta["lang_aug_map"] if "lang_aug_map" in meta.keys() else None,
-                    action_mode = self.action_mode
-                ):
-                    sample["domain_id"] = torch.tensor(DATA_DOMAIN_ID.get(robot_type, 0))
-                    idx_for_delta = sample.pop("idx_for_delta", [])
-                    idx_for_mask_proprio = sample.pop("idx_for_mask_proprio", [])
-                    sample.update(action_slice(sample.pop("abs_trajectory", None), idx_for_delta, idx_for_mask_proprio))
-                    yield sample
+            warned_invalid_trajectory = False
+            for sample in handler.iter_episode(
+                traj_idx,
+                num_actions=self.num_actions,
+                training=self.training,
+                image_aug=self.image_aug,
+                lang_aug_map=meta["lang_aug_map"] if "lang_aug_map" in meta else None,
+                action_mode=self.action_mode,
+            ):
+                sample["domain_id"] = torch.tensor(DATA_DOMAIN_ID.get(robot_type, 0))
+                idx_for_delta = sample.pop("idx_for_delta", [])
+                idx_for_mask_proprio = sample.pop("idx_for_mask_proprio", [])
+                abs_trajectory = sample.pop("abs_trajectory", None)
+                if not torch.isfinite(abs_trajectory).all():
+                    if not warned_invalid_trajectory:
+                        warnings.warn(
+                            f"Skipping non-finite action data from dataset={dataset_name!r}, "
+                            f"trajectory={traj_idx}.",
+                            RuntimeWarning,
+                        )
+                        warned_invalid_trajectory = True
+                    continue
+                sample.update(action_slice(abs_trajectory, idx_for_delta, idx_for_mask_proprio))
+                yield sample
         if self.training: yield from self._iter_one_dataset(dataset_name)
 
 

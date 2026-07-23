@@ -36,6 +36,25 @@ from .action_hub import build_action_space
 from .configuration_xvla import XVLAConfig
 
 
+def _require_finite(name: str, tensor: torch.Tensor) -> None:
+    """Raise a useful error at the first non-finite model boundary."""
+    finite = torch.isfinite(tensor)
+    if finite.all():
+        return
+
+    bad_index = (~finite).nonzero(as_tuple=False)[0].tolist()
+    finite_values = tensor.detach().float()[finite]
+    value_range = (
+        f"[{finite_values.min().item():.6g}, {finite_values.max().item():.6g}]"
+        if finite_values.numel()
+        else "no finite values"
+    )
+    raise FloatingPointError(
+        f"{name} contains NaN/Inf at index {bad_index}; "
+        f"shape={tuple(tensor.shape)}, dtype={tensor.dtype}, finite_range={value_range}."
+    )
+
+
 class XVLA(PreTrainedModel):
     """
     XVLA: HuggingFace-compatible Vision-Language-Action policy.
@@ -159,7 +178,15 @@ class XVLA(PreTrainedModel):
         2) Diffusion-style noisy mixture of actions: x_t = t*noise + (1-t)*gt.
         3) Space-specific preprocessing, prediction, and supervised loss.
         """
+        if torch.is_anomaly_enabled():
+            _require_finite("action target", action)
+            _require_finite("proprio", proprio)
+            _require_finite("image input", image_input)
+
         enc = self.forward_vlm(input_ids, image_input, image_mask)
+        if torch.is_anomaly_enabled():
+            _require_finite("VLM features", enc["vlm_features"])
+            _require_finite("auxiliary visual features", enc["aux_visual_inputs"])
 
         B = input_ids.shape[0]
         t = (torch.rand(1, device=input_ids.device)
@@ -167,6 +194,8 @@ class XVLA(PreTrainedModel):
 
         action_noisy = torch.randn_like(action) * t.view(-1, 1, 1) + action * (1 - t).view(-1, 1, 1)
         proprio_m, action_noisy_m = self.action_space.preprocess(proprio, action_noisy)
+        if torch.is_anomaly_enabled():
+            _require_finite("preprocessed noisy action", action_noisy_m)
 
         pred_action, prompt_pool_res = self.transformer(
             domain_id=domain_id,
@@ -175,7 +204,13 @@ class XVLA(PreTrainedModel):
             proprio=proprio_m,
             **enc,
         )
-        return self.action_space.compute_loss(pred_action, action), prompt_pool_res
+        if torch.is_anomaly_enabled():
+            _require_finite("predicted action", pred_action)
+        losses = self.action_space.compute_loss(pred_action, action)
+        if torch.is_anomaly_enabled():
+            for name, value in losses.items():
+                _require_finite(name, value)
+        return losses, prompt_pool_res
 
     # ================================= inference =================================
     @torch.no_grad()
